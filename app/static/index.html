@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Notes Assistant</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 820px; margin: 24px auto; padding: 0 16px; color: #222; }
+  h1 { font-size: 1.5rem; }
+  section { border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; }
+  input[type=text] { width: 70%; padding: 6px; }
+  button { padding: 6px 12px; cursor: pointer; }
+  .msg { margin-top: 8px; min-height: 1.2em; }
+  .error { color: #b00020; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { text-align: left; padding: 6px; border-bottom: 1px solid #eee; vertical-align: top; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.8rem; background: #e8eefc; }
+  .uncertain { background: #ffe3b3; color: #7a4a00; font-weight: 600; }
+  .id { font-family: monospace; color: #555; }
+  .filters button.active { background: #333; color: #fff; }
+</style>
+</head>
+<body>
+<h1>Smart Notes Assistant</h1>
+
+<section>
+  <h2>Add a note</h2>
+  <input type="text" id="noteText" placeholder="e.g. Pay the electricity bill by the 28th" maxlength="1000">
+  <button id="addBtn">Save</button>
+  <button id="starterBtn" title="Loads data/starter_notes.json (N001-N012). Safe to click twice.">Load sample notes</button>
+  <div class="msg" id="addMsg"></div>
+</section>
+
+<section>
+  <h2>Search</h2>
+  <input type="text" id="query" placeholder="e.g. hotel, or: what do I need to buy?">
+  <button id="searchBtn">Search</button>
+  <div class="msg" id="searchMsg"></div>
+  <table id="results"></table>
+</section>
+
+<section>
+  <h2>Notes</h2>
+  <div class="filters" id="filters"></div>
+  <table id="notes"></table>
+</section>
+
+<script>
+const CATEGORIES = ["All", "Study", "Money", "Travel", "Shopping", "Uncertain"];
+let activeFilter = "All";
+
+function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+
+function badges(n) {
+  let html = `<span class="badge">${esc(n.category)}</span>`;
+  if (n.uncertain) html += ` <span class="badge uncertain" title="Model confidence ${n.confidence}">Uncertain</span>`;
+  return html;
+}
+
+function row(n, extra = "") {
+  return `<tr><td class="id">${esc(n.id)}</td><td>${esc(n.text)}</td><td>${badges(n)}</td>
+          <td>${(n.confidence * 100).toFixed(0)}%</td>${extra}</tr>`;
+}
+
+async function apiError(res) {
+  try {
+    const body = await res.json();
+    if (Array.isArray(body.detail)) return body.detail.map(d => d.msg).join("; ");
+    return body.detail || res.statusText;
+  } catch { return res.statusText; }
+}
+
+async function loadNotes() {
+  let url = "/notes";
+  if (activeFilter === "Uncertain") url += "?uncertain=true";
+  else if (activeFilter !== "All") url += "?category=" + encodeURIComponent(activeFilter);
+  const notes = await (await fetch(url)).json();
+  document.getElementById("notes").innerHTML =
+    "<tr><th>ID</th><th>Note</th><th>Category</th><th>Confidence</th></tr>" +
+    (notes.length ? notes.map(n => row(n)).join("") : "<tr><td colspan=4>No notes.</td></tr>");
+}
+
+function renderFilters() {
+  document.getElementById("filters").innerHTML = "Filter: " + CATEGORIES.map(c =>
+    `<button class="${c === activeFilter ? "active" : ""}" data-cat="${c}">${c}</button>`).join(" ");
+  document.querySelectorAll("#filters button").forEach(b => b.onclick = () => {
+    activeFilter = b.dataset.cat; renderFilters(); loadNotes();
+  });
+}
+
+async function addNote() {
+  const input = document.getElementById("noteText"), msg = document.getElementById("addMsg");
+  const text = input.value;
+  if (!text.trim()) { msg.className = "msg error"; msg.textContent = "Please type a note before saving."; return; }
+  const res = await fetch("/notes", { method: "POST", headers: { "Content-Type": "application/json" },
+                                       body: JSON.stringify({ text }) });
+  if (!res.ok) { msg.className = "msg error"; msg.textContent = "Could not save: " + await apiError(res); return; }
+  const n = await res.json();
+  msg.className = "msg";
+  msg.innerHTML = `Saved <span class="id">${esc(n.id)}</span> as ${badges(n)}` +
+    (n.uncertain ? " - the model is not sure this note fits any category." : "");
+  input.value = "";
+  loadNotes();
+}
+
+async function loadStarter() {
+  const r = await (await fetch("/notes/load-starter", { method: "POST" })).json();
+  const msg = document.getElementById("addMsg");
+  msg.className = "msg";
+  msg.textContent = `Sample notes: ${r.added} added, ${r.skipped_existing} already present.`;
+  loadNotes();
+}
+
+async function search() {
+  const q = document.getElementById("query").value, msg = document.getElementById("searchMsg");
+  const table = document.getElementById("results");
+  table.innerHTML = "";
+  if (!q.trim()) { msg.className = "msg error"; msg.textContent = "Please type something to search for."; return; }
+  const res = await fetch("/search?q=" + encodeURIComponent(q));
+  if (!res.ok) { msg.className = "msg error"; msg.textContent = await apiError(res); return; }
+  const data = await res.json();
+  msg.className = "msg";
+  msg.textContent = data.results.length ? `Top matches (${data.method} search):` : data.message;
+  if (data.results.length)
+    table.innerHTML = "<tr><th>ID</th><th>Note</th><th>Category</th><th>Confidence</th><th>Relevance</th></tr>" +
+      data.results.map(n => row(n, `<td>${n.score.toFixed(2)}</td>`)).join("");
+}
+
+document.getElementById("addBtn").onclick = addNote;
+document.getElementById("noteText").onkeydown = e => { if (e.key === "Enter") addNote(); };
+document.getElementById("starterBtn").onclick = loadStarter;
+document.getElementById("searchBtn").onclick = search;
+document.getElementById("query").onkeydown = e => { if (e.key === "Enter") search(); };
+renderFilters();
+loadNotes();
+</script>
+</body>
+</html>
